@@ -6,6 +6,7 @@ import surprise
 
 
 from sklearn.decomposition import NMF, TruncatedSVD
+# from sklearn.model_selection import train_test_split
 from surprise import accuracy, SVD
 from surprise import Reader
 
@@ -14,6 +15,10 @@ def preprocess_data(X_train, X_test):
     X_train = pd.concat([X_train, X_test])
     X_train.loc[X_test.index, "rating"] = np.NaN
     return X_train, X_test
+
+
+def postprocess(prediction_res):
+    return (prediction_res * 2).round(0) / 2
 
 
 def get_rse(prediction: pd.DataFrame, test_set: pd.DataFrame):
@@ -41,8 +46,8 @@ def populate_util_matrix(X_train: pd.DataFrame, util_matrix: pd.DataFrame):
     return util_matrix.mask(np.isnan, other=mean_adjusted_ratings)
 
 
-def truncated_svd(util_matrix, X_test):
-    svd = TruncatedSVD(n_components=12, random_state=42)
+def truncated_svd(util_matrix):
+    svd = TruncatedSVD(n_components=14, random_state=42)
     svd.fit(util_matrix)
     sigma = np.diag(svd.singular_values_)
     VT = svd.components_
@@ -52,16 +57,16 @@ def truncated_svd(util_matrix, X_test):
     svd_prediction = pd.DataFrame(svd_prediction,
                                   columns=util_matrix.columns,
                                   index=util_matrix.index)
-    return get_rse(svd_prediction.stack().reset_index(), X_test)
+    return svd_prediction
 
 
-def iterative_svd(util_matrix, X_test):
-    svd_iter = TruncatedSVD(n_components=5, random_state=1234)
+def iterative_svd(util_matrix):
+    svd_iter = TruncatedSVD(n_components=14, random_state=1234)
 
     def if_converged():
         return np.all(np.isclose(Z_0, Z_next, rtol=1, atol=1))
 
-    def if_exceed_max_iter(i, max_iter=35):
+    def if_exceed_max_iter(i, max_iter=20):
         return i > max_iter
 
     i = 1
@@ -81,18 +86,18 @@ def iterative_svd(util_matrix, X_test):
         Z_0 = Z_0.mask(nan_indices, Z_next)
         i += 1
 
-    return get_rse(Z_0.stack(), X_test)
+    return Z_next
 
 
-def nmf(util_matrix, X_test):
+def nmf(util_matrix):
     epsilon = 10e-4
     nmf_offset = abs(np.min(util_matrix.values)) + epsilon
-    nmf_model = NMF(n_components=19, random_state=1234)
+    nmf_model = NMF(n_components=35, random_state=1234)
     W = nmf_model.fit_transform(util_matrix + nmf_offset)
     H = nmf_model.components_
     X_approx = np.dot(W, H) - nmf_offset
     X_approx = pd.DataFrame(X_approx, columns=util_matrix.columns, index=util_matrix.index)
-    return get_rse(X_approx.stack().reset_index(), X_test)
+    return X_approx
 
 
 DECOMPOSITION_ALGO = {'SVD1': truncated_svd, 'SVD2': iterative_svd, 'NMF': nmf}
@@ -101,7 +106,9 @@ DECOMPOSITION_ALGO = {'SVD1': truncated_svd, 'SVD2': iterative_svd, 'NMF': nmf}
 def run_decomposition(algo: str, X_train, X_test):
     util_matrix = create_util_matrix(X_train)
     util_matrix = populate_util_matrix(X_train, util_matrix)
-    return DECOMPOSITION_ALGO[algo](util_matrix, X_test)
+    decomposition_res = DECOMPOSITION_ALGO[algo](util_matrix)
+    decomposition_res = postprocess(decomposition_res)
+    return get_rse(decomposition_res.stack().reset_index(), X_test)
 
 
 def svd_sgd(X_train, X_test):
@@ -120,10 +127,7 @@ if __name__ == '__main__':
     parser.add_argument('--train', default="train_ratings.csv")
     parser.add_argument('--test', default="test_ratings.csv")
     parser.add_argument('--alg', default="SGD", required=False)
-    parser.add_argument('--result',
-                        default=os.path.join(os.getcwd(), "wynik.txt"),
-                        required=False,
-                        help='result file  (default: %(default)s)')
+    parser.add_argument('--result')
 
     args = parser.parse_args()
     train_path, test_path, alg, result = args.train, args.test, args.alg, args.result
@@ -135,6 +139,9 @@ if __name__ == '__main__':
     # data = pd.read_csv(ratings_path).drop(["timestamp"], axis=1)
     # X_train, X_test = train_test_split(data, test_size=0.1, random_state=42)
 
+    # X_train.to_csv(os.path.join(os.getcwd(), 'train.csv'), index=False)
+    # X_test.to_csv(os.path.join(os.getcwd(), 'test.csv'), index=False)
+
     if alg == 'SGD':
         reader = Reader()
         X_train = surprise.Dataset.load_from_df(X_train, reader).build_full_trainset()
@@ -144,4 +151,5 @@ if __name__ == '__main__':
         X_train, X_test = preprocess_data(X_train.sort_index(), X_test.sort_index())
         rse = run_decomposition(alg, X_train, X_test)
 
-    print(rse)
+    with open(result, "w") as text_file:
+        text_file.write(str(rse))
